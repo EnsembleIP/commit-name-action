@@ -6,7 +6,7 @@ inputs:
   github-token:
     description: "GitHub token used to post PR comments and fetch commits."
     required: false
-    default: ${{ github.token }}
+    default: "${{ github.token }}"
   comment-marker:
     description: "HTML comment marker to identify comments created by this action."
     required: false
@@ -112,22 +112,22 @@ runs:
           ).join('\n');
           
           const commentBody = `${marker}
-## ❌ Commit Name Validation Failed
-
-The following commit(s) do not follow the required format \`[QD-{issue-key}] {message}\`:
-
-${commitList}
-
-**Required format**: \`[QD-123] Your commit message here\`
-
-Please update the commit messages to follow the required format. You can use:
-\`\`\`bash
-git rebase -i HEAD~n  # where n is the number of commits to edit
-# Then use 'reword' to change commit messages
-\`\`\`
-
----
-*Note: Merge commits are automatically excluded from this validation.*`;
+          ## ❌ Commit Name Validation Failed
+          
+          The following commit(s) do not follow the required format \`[QD-{issue-key}] {message}\`:
+          
+          ${commitList}
+          
+          **Required format** - \`[QD-123] Your commit message here\`
+          
+          Please update the commit messages to follow the required format. You can use:
+          \`\`\`bash
+          git rebase -i HEAD~n  # where n is the number of commits to edit
+          # Then use 'reword' to change commit messages
+          \`\`\`
+          
+          ---
+          *Note: Merge commits are automatically excluded from this validation.*`.replace(/^          /gm, '');
           
           // Create or update comment
           if (existingComment) {
