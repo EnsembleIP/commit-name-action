@@ -1,5 +1,5 @@
 name: "Commit Name Validator"
-description: "Validates that all commits in a PR follow the format [QD-{number}] {message}. Posts PR comments for violations."
+description: "Validates branch names and commit messages in PRs. Ensures branch names follow the pattern (bug|story|task|spike)/QD-{number}-{description} and commits follow [QD-{number}] {message} format. Posts PR comments for violations."
 author: "EnsembleIP"
 
 inputs:
@@ -15,26 +15,48 @@ inputs:
     description: "Regular expression pattern for validating commit message format."
     required: false
     default: "^\\[QD-\\d+\\] .+"
+  branch-pattern:
+    description: "Regular expression pattern for validating branch name format."
+    required: false
+    default: "^(bug|story|task|spike)/QD-\\d+-[a-z0-9-]+"
 
 runs:
   using: "composite"
   steps:
-    - name: Validate commit names
+    - name: Validate branch name
+      id: validate-branch
+      if: github.event.pull_request
       uses: actions/github-script@v7
       env:
-        COMMENT_MARKER: ${{ inputs.comment-marker }}
+        BRANCH_PATTERN: ${{ inputs.branch-pattern }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const branchPattern = new RegExp(process.env.BRANCH_PATTERN);
+          const branchName = context.payload.pull_request.head.ref;
+          
+          core.info(`Validating branch name: ${branchName}`);
+          
+          const isValid = branchPattern.test(branchName);
+          core.setOutput('valid', isValid.toString());
+          core.setOutput('branch-name', branchName);
+          
+          if (isValid) {
+            core.info("✅ Branch name follows the required format!");
+          } else {
+            core.warning(`❌ Branch name does not match pattern: ${process.env.BRANCH_PATTERN}`);
+          }
+
+    - name: Validate commit names
+      id: validate-commits
+      if: github.event.pull_request
+      uses: actions/github-script@v7
+      env:
         COMMIT_PATTERN: ${{ inputs.commit-pattern }}
       with:
         github-token: ${{ inputs.github-token }}
         script: |
-          const marker = process.env.COMMENT_MARKER;
           const pattern = new RegExp(process.env.COMMIT_PATTERN);
-          
-          // Skip if not a pull request event
-          if (!context.payload.pull_request) {
-            core.info("Not a pull request event, skipping commit name validation.");
-            return;
-          }
           
           const owner = context.repo.owner;
           const repo = context.repo.repo;
@@ -76,6 +98,112 @@ runs:
             }
           }
           
+          const isValid = invalidCommits.length === 0;
+          core.setOutput('valid', isValid.toString());
+          core.setOutput('invalid-count', invalidCommits.length.toString());
+          core.setOutput('invalid-commits', JSON.stringify(invalidCommits));
+          
+          if (isValid) {
+            core.info("✅ All commits follow the required naming format!");
+          } else {
+            core.warning(`❌ Found ${invalidCommits.length} commit(s) with invalid names.`);
+          }
+
+    - name: Post success message
+      if: |
+        github.event.pull_request &&
+        steps.validate-branch.outputs.valid == 'true' &&
+        steps.validate-commits.outputs.valid == 'true'
+      uses: actions/github-script@v7
+      env:
+        COMMENT_MARKER: ${{ inputs.comment-marker }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const marker = process.env.COMMENT_MARKER;
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          const prNumber = context.payload.pull_request.number;
+          
+          // Find and delete existing comment from this action
+          const { data: comments } = await github.rest.issues.listComments({
+            owner,
+            repo,
+            issue_number: prNumber
+          });
+          
+          const existingComment = comments.find(comment => 
+            comment.body && comment.body.includes(marker)
+          );
+          
+          if (existingComment) {
+            core.info("Removing previous validation comment...");
+            await github.rest.issues.deleteComment({
+              owner,
+              repo,
+              comment_id: existingComment.id
+            });
+            core.info("Previous comment removed.");
+          }
+
+    - name: Post failure message
+      if: |
+        github.event.pull_request &&
+        (steps.validate-branch.outputs.valid == 'false' || steps.validate-commits.outputs.valid == 'false')
+      uses: actions/github-script@v7
+      env:
+        COMMENT_MARKER: ${{ inputs.comment-marker }}
+        BRANCH_VALID: ${{ steps.validate-branch.outputs.valid }}
+        BRANCH_NAME: ${{ steps.validate-branch.outputs.branch-name }}
+        BRANCH_PATTERN: ${{ inputs.branch-pattern }}
+        COMMITS_VALID: ${{ steps.validate-commits.outputs.valid }}
+        INVALID_COMMITS: ${{ steps.validate-commits.outputs.invalid-commits }}
+        INVALID_COUNT: ${{ steps.validate-commits.outputs.invalid-count }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const marker = process.env.COMMENT_MARKER;
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          const prNumber = context.payload.pull_request.number;
+          
+          const branchValid = process.env.BRANCH_VALID === 'true';
+          const commitsValid = process.env.COMMITS_VALID === 'true';
+          
+          // Build failure message
+          let commentBody = `${marker}\n## ❌ Validation Failed\n\n`;
+          
+          // Add branch validation error if applicable
+          if (!branchValid) {
+            commentBody += `### Branch Name Validation Failed\n\n`;
+            commentBody += `Branch name \`${process.env.BRANCH_NAME}\` does not match the required pattern.\n\n`;
+            commentBody += `**Required pattern:** \`${process.env.BRANCH_PATTERN}\`\n\n`;
+            commentBody += `**Examples of valid branch names:**\n`;
+            commentBody += `- \`bug/QD-1234-fix-login-issue\`\n`;
+            commentBody += `- \`story/QD-456-add-user-dashboard\`\n`;
+            commentBody += `- \`task/QD-789-update-dependencies\`\n`;
+            commentBody += `- \`spike/QD-321-research-new-api\`\n\n`;
+          }
+          
+          // Add commit validation error if applicable
+          if (!commitsValid) {
+            const invalidCommits = JSON.parse(process.env.INVALID_COMMITS);
+            const commitList = invalidCommits.map(c => 
+              `- \`${c.sha}\`: ${c.message}`
+            ).join('\n');
+            
+            commentBody += `### Commit Name Validation Failed\n\n`;
+            commentBody += `The following commit(s) do not follow the required format \`[QD-{issue-key}] {message}\`:\n\n`;
+            commentBody += `${commitList}\n\n`;
+            commentBody += `**Required format:** \`[QD-123] Your commit message here\`\n\n`;
+            commentBody += `Please update the commit messages to follow the required format. You can use:\n`;
+            commentBody += `\`\`\`bash\n`;
+            commentBody += `git rebase -i HEAD~n  # where n is the number of commits to edit\n`;
+            commentBody += `# Then use 'reword' to change commit messages\n`;
+            commentBody += `\`\`\`\n\n`;
+            commentBody += `*Note: Merge commits are automatically excluded from this validation.*\n`;
+          }
+          
           // Find existing comment from this action
           const { data: comments } = await github.rest.issues.listComments({
             owner,
@@ -87,51 +215,9 @@ runs:
             comment.body && comment.body.includes(marker)
           );
           
-          if (invalidCommits.length === 0) {
-            core.info("✅ All commits follow the required naming format!");
-            
-            // Delete existing comment if present
-            if (existingComment) {
-              core.info("Removing previous failure comment...");
-              await github.rest.issues.deleteComment({
-                owner,
-                repo,
-                comment_id: existingComment.id
-              });
-              core.info("Previous failure comment removed.");
-            }
-            
-            return; // Success
-          }
-          
-          // Build failure message
-          core.warning(`❌ Found ${invalidCommits.length} commit(s) with invalid names.`);
-          
-          const commitList = invalidCommits.map(c => 
-            `- \`${c.sha}\`: ${c.message}`
-          ).join('\n');
-          
-          const commentBody = `${marker}
-          ## ❌ Commit Name Validation Failed
-          
-          The following commit(s) do not follow the required format \`[QD-{issue-key}] {message}\`:
-          
-          ${commitList}
-          
-          **Required format** - \`[QD-123] Your commit message here\`
-          
-          Please update the commit messages to follow the required format. You can use:
-          \`\`\`bash
-          git rebase -i HEAD~n  # where n is the number of commits to edit
-          # Then use 'reword' to change commit messages
-          \`\`\`
-          
-          ---
-          *Note: Merge commits are automatically excluded from this validation.*`.replace(/^          /gm, '');
-          
           // Create or update comment
           if (existingComment) {
-            core.info("Updating existing failure comment...");
+            core.info("Updating existing validation comment...");
             await github.rest.issues.updateComment({
               owner,
               repo,
@@ -140,7 +226,7 @@ runs:
             });
             core.info("Existing comment updated.");
           } else {
-            core.info("Creating new failure comment...");
+            core.info("Creating new validation comment...");
             await github.rest.issues.createComment({
               owner,
               repo,
@@ -151,4 +237,7 @@ runs:
           }
           
           // Fail the action
-          core.setFailed(`${invalidCommits.length} commit(s) do not follow the required naming format [QD-{issue-key}] {message}`);
+          const errors = [];
+          if (!branchValid) errors.push('Branch name validation failed');
+          if (!commitsValid) errors.push(`${process.env.INVALID_COUNT} commit(s) with invalid names`);
+          core.setFailed(errors.join('; '));
